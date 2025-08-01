@@ -96,6 +96,7 @@ class WeightedImputer(nn.Module):
         drop_social: bool = False,
         mean_social: torch.Tensor = None,
         drop_authors: bool = False,
+        drop_author_topic: bool = False,
         mean_author_topic: torch.Tensor = None,
         mean_author_social: torch.Tensor = None
     ):
@@ -115,6 +116,7 @@ class WeightedImputer(nn.Module):
         drop_social       : if True, use mean_social for the social part of author embedding
         mean_social       : mean social embedding to use for ablation
         drop_authors      : if True, use mean_author_topic and mean_author_social for all authors
+        drop_author_topic : if True, use mean_author_topic but keep original author_social
         mean_author_topic : mean author topic embedding to use for ablation
         mean_author_social: mean author social embedding to use for ablation
 
@@ -148,21 +150,41 @@ class WeightedImputer(nn.Module):
             if ids.numel() == 0:
                 continue
             if ntype == 'author':
-                if drop_authors and mean_author_topic is not None and mean_author_social is not None:
+                if drop_authors and mean_author_topic is not None:
                     # Use mean embeddings for all authors
                     author_topic = mean_author_topic.expand(ids.size(0), -1)
-                    author_social = mean_author_social.expand(ids.size(0), -1)
-                elif mean_author_topic is not None and mean_author_social is not None and ids.size(0) > 0:
-                    # Use mean embeddings for all authors (inference-time 'no author' case)
+                    if mean_author_social is not None:
+                        author_social = mean_author_social.expand(ids.size(0), -1)
+                    elif 'author_social' in embs:
+                        # Fallback: use zeros if social embeddings exist but mean wasn't computed
+                        author_social = torch.zeros(ids.size(0), embs['author_social'].size(-1), device=embs['author_social'].device)
+                    else:
+                        # No social embeddings in dataset
+                        author_social = torch.zeros(ids.size(0), mean_author_topic.size(-1), device=mean_author_topic.device)
+                # This condition was causing full model to use mean embeddings - removed to fix train/test mismatch
+                elif drop_author_topic and mean_author_topic is not None:
+                    # Use mean topic but keep original social
                     author_topic = mean_author_topic.expand(ids.size(0), -1)
-                    author_social = mean_author_social.expand(ids.size(0), -1)
+                    if drop_social and mean_social is not None:
+                        # Also drop social if both flags are set
+                        author_social = mean_social.expand(ids.size(0), -1)
+                    else:
+                        if 'author_social' in embs:
+                            author_social = embs['author_social'][ids]   # [num_authors, hidden_dim]
+                        else:
+                            # No social embeddings in dataset
+                            author_social = torch.zeros(ids.size(0), mean_author_topic.size(-1), device=mean_author_topic.device)
                 else:
                     author_topic = embs['author'][ids]           # [num_authors, hidden_dim]
                     if drop_social and mean_social is not None:
                         # Use mean_social for all authors
                         author_social = mean_social.expand(author_topic.size(0), -1)
                     else:
-                        author_social = embs['author_social'][ids]   # [num_authors, hidden_dim]
+                        if 'author_social' in embs:
+                            author_social = embs['author_social'][ids]   # [num_authors, hidden_dim]
+                        else:
+                            # No social embeddings in dataset  
+                            author_social = torch.zeros(author_topic.size(0), author_topic.size(-1), device=author_topic.device)
                 author_embeddings = torch.cat([author_topic, author_social], dim=1)  # [num_authors, 2*hidden_dim]
                 # Use attention mechanism for authors
                 aggregated_authors = self.aggregate_authors_with_attention(author_embeddings)

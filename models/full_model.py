@@ -169,6 +169,7 @@ class ImpactModel(nn.Module):
                                         drop_social      = (self.input_feature_model == 'drop social'),
                                         mean_social      = mean_social,
                                         drop_authors     = (self.input_feature_model == 'drop authors'),
+                                        drop_author_topic = (self.input_feature_model == 'drop author topic'),
                                         mean_author_topic = mean_author_topic,
                                         mean_author_social = mean_author_social
                                     )
@@ -263,10 +264,34 @@ class ImpactModel(nn.Module):
                 mean_topic = embeddings[t]['paper'].mean(dim=0, keepdim=True)  # [1, hidden_dim]
                 topic_all = mean_topic.expand(y_true.size(0), -1).to(device)
             elif self.input_feature_model == 'drop topic':
-                topic_all = torch.zeros(y_true.size(0), self.hidden_dim, device=device)
+                # Use mean topic embedding for ablation (consistent with training)
+                mean_topic = embeddings[t]['paper'].mean(dim=0, keepdim=True)  # [1, hidden_dim]
+                topic_all = mean_topic.expand(y_true.size(0), -1).to(device)
             else:
                 topic_all = embeddings[t]['paper'][paper_ids]
             N = y_true.size(0)
+
+            # Compute mean embeddings for inference-time ablation
+            mean_social = None
+            mean_author_topic = None  
+            mean_author_social = None
+            
+            # Check for inference-time social dropping
+            if ((hasattr(self.args, 'inference_time_social_dropping') and self.args.inference_time_social_dropping == 'drop social') or
+                self.input_feature_model == 'drop social'):
+                if 'author_social' in embeddings[t]:
+                    mean_social = embeddings[t]['author_social'].mean(dim=0, keepdim=True)
+            
+            # Check for inference-time author dropping  
+            if ((hasattr(self.args, 'inference_time_author_dropping') and self.args.inference_time_author_dropping == 'no author') or
+                self.input_feature_model == 'drop authors'):
+                mean_author_topic = embeddings[t]['author'].mean(dim=0, keepdim=True)
+                if 'author_social' in embeddings[t]:
+                    mean_author_social = embeddings[t]['author_social'].mean(dim=0, keepdim=True)
+            
+            # Check for 'drop author topic' ablation
+            if self.input_feature_model == 'drop author topic':
+                mean_author_topic = embeddings[t]['author'].mean(dim=0, keepdim=True)
 
             neigh_cache = [
                 self.imputer.collect_neighbours(data, int(pid), device)
@@ -285,11 +310,12 @@ class ImpactModel(nn.Module):
                                                 embeddings,
                                                 predefined_neigh = neigh_cache[i],
                                                 topic_vec        = topic_all[i],
-                                                drop_social      = (self.input_feature_model == 'drop social'),
-                                                mean_social      = None,
-                                                drop_authors     = (self.input_feature_model == 'drop authors'),
-                                                mean_author_topic = None,
-                                                mean_author_social = None
+                                                drop_social      = (self.input_feature_model == 'drop social') or (hasattr(self.args, 'inference_time_social_dropping') and self.args.inference_time_social_dropping == 'drop social'),
+                                                mean_social      = mean_social,
+                                                drop_authors     = (self.input_feature_model == 'drop authors') or (hasattr(self.args, 'inference_time_author_dropping') and self.args.inference_time_author_dropping == 'no author'),
+                                                drop_author_topic = (self.input_feature_model == 'drop author topic'),
+                                                mean_author_topic = mean_author_topic,
+                                                mean_author_social = mean_author_social
                                             )
                                             for i in range(N)
                                         ], dim=0)                               # [N,2*H]
@@ -336,7 +362,10 @@ class ImpactModel(nn.Module):
             mean_topic = embeddings[current_year_idx]['paper'].mean(dim=0, keepdim=True)  # [1, hidden_dim]
             topic_vec = mean_topic.squeeze(0).to(device)
         elif self.input_feature_model == 'drop topic':
-            topic_vec = torch.zeros(self.hidden_dim, device=device)
+            # Use mean topic embedding for ablation (consistent with training)
+            embeddings = [self.encoder(g) for g in snapshots]
+            mean_topic = embeddings[current_year_idx]['paper'].mean(dim=0, keepdim=True)  # [1, hidden_dim]
+            topic_vec = mean_topic.squeeze(0).to(device)
         else:
             topic_vec = topic_vec.to(device)
 
@@ -376,6 +405,22 @@ class ImpactModel(nn.Module):
             # Get author indices for this year
             author_indices = self._get_author_indices_for_year(author_ids, yr, snapshots)
             
+            # Compute mean embeddings for this year (for ablation)
+            mean_social_yr = None
+            mean_author_topic_yr = mean_author_topic  # Use pre-computed if available
+            mean_author_social_yr = mean_author_social
+            
+            if ((hasattr(self.args, 'inference_time_social_dropping') and self.args.inference_time_social_dropping == 'drop social') or
+                self.input_feature_model == 'drop social'):
+                if 'author_social' in embeddings[yr]:
+                    mean_social_yr = embeddings[yr]['author_social'].mean(dim=0, keepdim=True)
+            
+            if mean_author_topic_yr is None and ((hasattr(self.args, 'inference_time_author_dropping') and self.args.inference_time_author_dropping == 'no author') or
+                self.input_feature_model == 'drop authors'):
+                mean_author_topic_yr = embeddings[yr]['author'].mean(dim=0, keepdim=True)
+                if 'author_social' in embeddings[yr]:
+                    mean_author_social_yr = embeddings[yr]['author_social'].mean(dim=0, keepdim=True)
+
             # Use imputer to get the embedding for this year
             v_k = self.imputer(
                 None,  # paper_id not needed
@@ -384,11 +429,12 @@ class ImpactModel(nn.Module):
                 embeddings,
                 predefined_neigh={'author': author_indices},
                 topic_vec=topic_vec,
-                drop_social      = (self.input_feature_model == 'drop social'),
-                mean_social      = None,
-                drop_authors     = (self.input_feature_model == 'drop authors'),
-                mean_author_topic = mean_author_topic,
-                mean_author_social = mean_author_social
+                drop_social      = (self.input_feature_model == 'drop social') or (hasattr(self.args, 'inference_time_social_dropping') and self.args.inference_time_social_dropping == 'drop social'),
+                mean_social      = mean_social_yr,
+                drop_authors     = (self.input_feature_model == 'drop authors') or (hasattr(self.args, 'inference_time_author_dropping') and self.args.inference_time_author_dropping == 'no author'),
+                drop_author_topic = (self.input_feature_model == 'drop author topic'),
+                mean_author_topic = mean_author_topic_yr,
+                mean_author_social = mean_author_social_yr
             )
             seq.append(v_k)
 
@@ -435,10 +481,30 @@ class ImpactModel(nn.Module):
                 mean_topic = encs[t]['paper'].mean(dim=0, keepdim=True)  # [1, hidden_dim]
                 topic_all = mean_topic.expand(y_true.size(0), -1).to(device)
             elif self.input_feature_model == 'drop topic':
-                topic_all = torch.zeros(y_true.size(0), self.hidden_dim, device=device)
+                # Use mean topic embedding for ablation (consistent with training)
+                mean_topic = encs[t]['paper'].mean(dim=0, keepdim=True)  # [1, hidden_dim]
+                topic_all = mean_topic.expand(y_true.size(0), -1).to(device)
             else:
                 topic_all = encs[t]['paper'][paper_ids]
             N = y_true.size(0)
+
+            # Compute mean embeddings for inference-time ablation
+            mean_social = None
+            mean_author_topic = None  
+            mean_author_social = None
+            
+            # Check for inference-time social dropping
+            if ((hasattr(self.args, 'inference_time_social_dropping') and self.args.inference_time_social_dropping == 'drop social') or
+                self.input_feature_model == 'drop social'):
+                if 'author_social' in encs[t]:
+                    mean_social = encs[t]['author_social'].mean(dim=0, keepdim=True)
+            
+            # Check for inference-time author dropping  
+            if ((hasattr(self.args, 'inference_time_author_dropping') and self.args.inference_time_author_dropping == 'no author') or
+                self.input_feature_model == 'drop authors'):
+                mean_author_topic = encs[t]['author'].mean(dim=0, keepdim=True)
+                if 'author_social' in encs[t]:
+                    mean_author_social = encs[t]['author_social'].mean(dim=0, keepdim=True)
 
             # Get all author indices for all papers at once
             neigh_cache = [
@@ -524,6 +590,22 @@ class ImpactModel(nn.Module):
             yr = current_year_idx - k
             
             # Build sequence step for all teams at once
+            # Compute mean embeddings for this year (for ablation)
+            mean_social_yr = None
+            mean_author_topic_yr = None
+            mean_author_social_yr = None
+            
+            if ((hasattr(self.args, 'inference_time_social_dropping') and self.args.inference_time_social_dropping == 'drop social') or
+                self.input_feature_model == 'drop social'):
+                if 'author_social' in embeddings[yr]:
+                    mean_social_yr = embeddings[yr]['author_social'].mean(dim=0, keepdim=True)
+            
+            if ((hasattr(self.args, 'inference_time_author_dropping') and self.args.inference_time_author_dropping == 'no author') or
+                self.input_feature_model == 'drop authors'):
+                mean_author_topic_yr = embeddings[yr]['author'].mean(dim=0, keepdim=True)
+                if 'author_social' in embeddings[yr]:
+                    mean_author_social_yr = embeddings[yr]['author_social'].mean(dim=0, keepdim=True)
+            
             seq_k = torch.stack([
                 self.imputer(
                     None,  # paper_id not needed
@@ -532,11 +614,12 @@ class ImpactModel(nn.Module):
                     embeddings,
                     predefined_neigh={'author': self._get_author_indices_for_year(teams[i][0], yr, snapshots)},
                     topic_vec=teams[i][1],
-                    drop_social      = (self.input_feature_model == 'drop social'),
-                    mean_social      = None,
-                    drop_authors     = (self.input_feature_model == 'drop authors'),
-                    mean_author_topic = None,
-                    mean_author_social = None
+                    drop_social      = (self.input_feature_model == 'drop social') or (hasattr(self.args, 'inference_time_social_dropping') and self.args.inference_time_social_dropping == 'drop social'),
+                    mean_social      = mean_social_yr,
+                    drop_authors     = (self.input_feature_model == 'drop authors') or (hasattr(self.args, 'inference_time_author_dropping') and self.args.inference_time_author_dropping == 'no author'),
+                    drop_author_topic = (self.input_feature_model == 'drop author topic'),
+                    mean_author_topic = mean_author_topic_yr,
+                    mean_author_social = mean_author_social_yr
                 )
                 for i in range(N)
             ], dim=0)  # [N, 2*H]

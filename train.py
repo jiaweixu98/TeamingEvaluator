@@ -101,12 +101,18 @@ def main():
                         help="Path to a .pt checkpoint file to load model and optimizer states for continuing training.")
     parser.add_argument("--training_off", type=int, default=0,
                     help="If 1, training is turned off and the model is evaluated only. If 0, training is turned on and the model is trained.")
-    parser.add_argument("--input_feature_model", choices=['all features', 'drop topic', 'drop authors', 'drop social'], default='all features',
-                        help="During the training, Input feature model to use. Choose one of the options: 'all features', 'drop topic', 'drop authors', or 'drop social'.")
+    parser.add_argument("--input_feature_model", choices=['all features', 'drop topic', 'drop authors', 'drop social', 'drop author topic'], default='all features',
+                        help="Ablation study options: 'all features' = full model with all features | "
+                             "'drop topic' = replace paper topic embeddings with yearly mean | "
+                             "'drop author topic' = replace author topic embeddings with yearly mean | "
+                             "'drop social' = replace author social embeddings with yearly mean | "
+                             "'drop authors' = replace both author topic AND social embeddings with yearly means")
     parser.add_argument("--inference_time_author_dropping", type=str, default=False,
                         help="Whether to drop authors from the training set. Default is False.")
     parser.add_argument("--inference_time_topic_dropping", type=str, default=False,
                         help="Whether to drop topic at inference time. Options: False, 'drop topic'. Default is False.")
+    parser.add_argument("--inference_time_social_dropping", type=str, default=False,
+                        help="Whether to drop social features at inference time. Options: False, 'drop social'. Default is False.")
     parser.add_argument("--weight_decay", type=float, default=5e-5,
                         help="Weight decay for the optimizer. Default is 5e-5.")
     parser.add_argument("--grad_clip", type=float, default=1.0,
@@ -121,7 +127,9 @@ def main():
                         help="Minimum learning rate. Default is 1e-5.")
     args = parser.parse_args()
 
-    run_dir_suffix = f"_{args.eval_mode}"
+    # Create descriptive run directory name with experiment type
+    feature_model_name = args.input_feature_model.replace(' ', '_').replace('_', '_')
+    run_dir_suffix = f"_{args.eval_mode}_{feature_model_name}"
     if args.load_checkpoint: # Add suffix if resuming to distinguish run directory
         run_dir_suffix += f"_resumedFrom_{os.path.splitext(os.path.basename(args.load_checkpoint))[0]}"
     run_dir = os.path.join("runs", time.strftime("%Y%m%d_%H%M%S") + run_dir_suffix)
@@ -289,6 +297,44 @@ def main():
                 
                 console.print(f"[green]Eval ({args.eval_mode})[/green] "
                                 f"MALE {male}  RMSLE {rmsle} MAPE {mape}")
+                
+                # Save raw predictions for sensitivity analysis
+                predictions_dir = "./sensitivity_results"
+                os.makedirs(predictions_dir, exist_ok=True)
+                
+                # Create descriptive filename for this experiment (replace spaces with underscores)
+                experiment_name = f"author_{args.inference_time_author_dropping}__topic_{args.input_feature_model}".replace(' ', '_')
+                pred_file = os.path.join(predictions_dir, f"{experiment_name}_predictions.npy")
+                true_file = os.path.join(predictions_dir, f"{experiment_name}_ground_truth.npy")
+                
+                # Save predictions and ground truth
+                np.save(pred_file, y_predict.numpy())
+                np.save(true_file, y_true.numpy())
+                
+                # Calculate and save sensitivity metrics
+                total_citations_pred = y_predict.sum(dim=1).numpy()  # Total citations per paper
+                total_citations_true = y_true.sum(dim=1).numpy()
+                
+                sensitivity_metrics = {
+                    'experiment': experiment_name,
+                    'male': male.tolist(),
+                    'rmsle': rmsle.tolist(), 
+                    'mape': mape.tolist(),
+                    'prediction_mean': float(total_citations_pred.mean()),
+                    'prediction_std': float(total_citations_pred.std()),
+                    'prediction_range': [float(total_citations_pred.min()), float(total_citations_pred.max())],
+                    'coefficient_of_variation': float(total_citations_pred.std() / total_citations_pred.mean()) if total_citations_pred.mean() > 0 else 0,
+                    'num_papers': int(len(total_citations_pred)),
+                }
+                
+                metrics_file = os.path.join(predictions_dir, f"{experiment_name}_metrics.json")
+                import json
+                with open(metrics_file, 'w') as f:
+                    json.dump(sensitivity_metrics, f, indent=2)
+                
+                console.print(f"[cyan]Predictions saved to: {pred_file}[/cyan]")
+                console.print(f"[cyan]Metrics saved to: {metrics_file}[/cyan]")
+                console.print(f"[cyan]Prediction std: {sensitivity_metrics['prediction_std']:.4f}, mean: {sensitivity_metrics['prediction_mean']:.4f}[/cyan]")
                 
                 plot_pred_true_distributions_with_ci(
                     y_true.numpy(),                   # expects numpy
